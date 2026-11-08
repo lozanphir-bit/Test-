@@ -55,6 +55,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .item .name { font-weight: 600; }
 .item.done .name { color: var(--muted); text-decoration: line-through; }
 .item .meta { font-size: .82rem; color: var(--muted); }
+.quip { font-size: .84rem; font-style: italic; color: var(--tiny); margin-top: 4px; text-wrap: pretty; }
 .streak { font-size: .82rem; font-weight: 700; color: var(--accent); white-space: nowrap; }
 .tinybtn { font-size: .75rem; border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 4px 9px; color: var(--muted); }
 .item.tinydone .tinybtn { background: var(--tiny-soft); color: var(--tiny); border-color: var(--tiny); }
@@ -148,9 +149,9 @@ const statusOf = (h, d) => (state.log[keyOf(d)] || {})[h.id]; // 'full' | 'tiny'
    Counts scheduled days completed (full or tiny). A single missed day is forgiven
    as long as the day before it was done; two misses in a row end the streak.
    Today only counts once it's done, so an unchecked today never breaks anything. */
-function streak(h) {
-  let d = today(), count = 0, misses = 0;
-  if (isScheduled(h, d) && !statusOf(h, d)) d = addDays(d, -1);
+function streak(h, from = today()) {
+  let d = from, count = 0, misses = 0;
+  if (keyOf(d) === keyOf(today()) && isScheduled(h, d) && !statusOf(h, d)) d = addDays(d, -1);
   for (let i = 0; i < 730; i++, d = addDays(d, -1)) {
     if (keyOf(d) < h.created) break;
     if (!isScheduled(h, d)) continue;
@@ -159,6 +160,66 @@ function streak(h) {
   }
   return count;
 }
+/* ---------- Lapses: dry remarks for missed days ----------
+   Looks at the scheduled days before today. One miss = "missed" (streak forgiven),
+   two or more = "broken" (streak lost), never done at all = "dormant". */
+function lapse(h) {
+  let d = addDays(today(), -1), misses = 0;
+  for (let i = 0; i < 365; i++, d = addDays(d, -1)) {
+    if (keyOf(d) < h.created) return misses >= 2 ? { kind: 'dormant', misses } : misses ? { kind: 'missed', misses } : null;
+    if (!isScheduled(h, d)) continue;
+    if (statusOf(h, d)) break;
+    misses++;
+  }
+  if (!misses) return null;
+  if (misses === 1) return { kind: 'missed', misses };
+  return { kind: 'broken', misses, lost: streak(h, d) };
+}
+
+const QUIPS = {
+  missed: [
+    'You skipped {name} yesterday. We’ve decided not to mention it. (We mentioned it.)',
+    'Yesterday’s {name} remains undone. It isn’t angry. Just disappointed.',
+    '{name} missed you yesterday. It wrote a poem about it. The poem is bad.',
+    'One miss is forgiven. Two is a pattern. Three is a lifestyle. Choose wisely.',
+    'Your streak is fine, legally speaking. Today is its parole hearing.',
+    'Yesterday, {name} sat by the window all evening. Anyway, no pressure.',
+  ],
+  broken: [
+    'Your {lost}-day {name} streak has passed away peacefully. In lieu of flowers, please just do it today.',
+    'We regret to inform you that your {lost}-day {name} streak has left to pursue other opportunities.',
+    'BREAKING: Local person forgets {name} {misses} days running. Neighbours “not surprised”.',
+    'The {name} streak ({lost} days) has been sent to a farm upstate, where it can run free.',
+    'Your {name} streak is now 0, which is technically a very round number.',
+    '{lost} days of {name}, lost like tears in rain. Anyway, here’s a fresh day 1.',
+    'Historians will long debate the fall of the Great {name} Streak ({lost} days). Rebuild the empire.',
+    'Day 0 of {name}. Every legend has an origin story. This is a slightly embarrassing one.',
+  ],
+  dormant: [
+    '{name} has been on this list {misses} days. It’s starting to feel like furniture.',
+    '{name} is still waiting. It has started knitting to pass the time.',
+    'Scientists confirm {name} remains undiscovered by its owner. Expedition planned for today.',
+    '{name} would like to remind you that it exists. Politely. For now.',
+  ],
+};
+const COMEBACKS = [
+  'It’s alive! Day 1 of the sequel 🧟',
+  'The prodigal habit returns. Streak reborn.',
+  'Back from the dead. Very dramatic. Love it.',
+  'Plot twist: you came back.',
+];
+// Same quip all day for a given habit, so it doesn't flicker on every tap.
+function quip(h, l) {
+  const list = QUIPS[l.kind];
+  let n = 0;
+  for (const c of h.id + keyOf(today())) n = (n * 31 + c.charCodeAt(0)) >>> 0;
+  return list[n % list.length]
+    .replace(/\{name\}/g, h.name.toLowerCase())
+    .replace(/\{lost\}/g, l.lost)
+    .replace(/\{misses\}/g, l.misses)
+    .replace(/^./, c => c.toUpperCase());
+}
+
 function rate(h, days = 28) {
   let done = 0, sched = 0;
   for (let i = 0; i < days; i++) {
@@ -174,10 +235,14 @@ function rate(h, days = 28) {
 function setStatus(id, value) {
   const k = keyOf(today());
   const day = state.log[k] || (state.log[k] = {});
+  const h = state.habits.find(x => x.id === id);
+  const wasLapsed = !day[id] && lapse(h);
   if (day[id] === value) delete day[id]; else day[id] = value;
   save();
   const due = dueToday();
-  if (value && day[id] && due.length && due.every(h => statusOf(h, today()))) {
+  if (wasLapsed && wasLapsed.kind !== 'missed') {
+    toast(pick(COMEBACKS));
+  } else if (value && day[id] && due.length && due.every(h => statusOf(h, today()))) {
     toast(pick(['All done for today 🎉', 'Clean sweep. Nice.', 'Every box ticked ✨']));
   } else if (day[id] === 'tiny') {
     toast('Tiny counts. Streak protected 🧡');
@@ -254,6 +319,7 @@ function renderToday() {
         <div class="body">
           <div class="name">${esc(h.emoji || '')} ${esc(h.name)}</div>
           ${h.cue ? `<div class="meta">After ${esc(h.cue)}</div>` : ''}
+          ${!s && lapse(h) ? `<div class="quip">${esc(quip(h, lapse(h)))}</div>` : ''}
         </div>
         ${h.tiny ? `<button class="tinybtn" data-tiny="${h.id}" title="${esc(h.tiny)}" aria-pressed="${s === 'tiny'}">tiny</button>` : ''}
         ${st ? `<span class="streak" title="Current streak">🔥 ${st}</span>` : ''}
